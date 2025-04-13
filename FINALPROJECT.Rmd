@@ -1,0 +1,306 @@
+---
+title: "Project"
+author: "Ruben"
+date: "2024-11-25"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+install.packages("tidyverse")
+install.packages("caret")
+install.packages("car")
+install.packages("lmtest")
+install.packages("Metrics")
+install.packages("GGally")
+library(dplyr)
+library(tidyverse)   # For data manipulation and plotting
+library(caret)       # For model training and cross-validation
+library(car)         # For Variance Inflation Factor (VIF) and other diagnostics
+library(lmtest)      # For statistical tests (e.g., Breusch-Pagan test)
+library(Metrics) 
+library(glmnet)
+library(ggplot2) 
+library(GGally)
+library(MASS)
+```
+
+```{r}
+cars = read.csv("/Users/rubenodehcua/Desktop/audi.csv", header = TRUE)
+```
+
+```{r}
+######## THERE IS A BUG I COULD NOT FIX (IN REGRESSION_ANALYSIS)
+data <- cars
+x <- model.matrix(~ . - price - model, data = cars)[,-1]
+y <- cars$price
+model <- lm(y ~ x, data)
+summary(model)
+########
+```
+
+```{r}
+regression_analysis(cars, "price")
+```
+
+```{r}
+regression_analysis <- function(data, yname) {
+  
+  
+  analysis_type <- "x"
+  while(!(analysis_type == "predictive") && !(analysis_type == "explanatory")){
+    analysis_type <- readline(prompt = "(explanatory/predictive): ")
+    if(!(analysis_type == "predictive") && !(analysis_type == "explanatory")){
+      print("Invalid input")
+    }
+  }
+  
+  data <- na.omit(data)
+  
+  formula1 <- as.formula(paste("~ . -", yname, "- model")) ## SPECIAL CASE FOR THIS DATASET
+  x <- model.matrix(formula1, data = data)[,-1]
+  y <- data[[yname]] 
+  metrics_df <- data.frame()
+  model <- lm(y ~ x, data)
+  
+  
+  if(analysis_type == "explanatory"){
+    summary(model)
+    metrics_df <- olsfunc(x, y, data, metrics_df) #OLS
+    diagnos(x, y, data) #Diagnostic
+    ftest(data, y) #Ftest
+    
+    ### Transformations
+    transformation <- "x"
+    while (!(transformation == "done")) {
+      transformation <- readline(prompt = "Transform (log/squareroot/boxcox)(done if done): ")
+      if(transformation == "log"){
+        y <- log(abs(y))
+        plot(fitted(model), log(abs(residuals(model))), xlab = "Fitted", ylab = expression(log(hat(epsilon))))
+        print(summary(lm(log(abs(residuals(model))) ~ fitted(model))))
+        model <- lm(y ~ x, data)
+      }else if(transformation == "squareroot"){
+        y <- sqrt(abs(y))
+        plot(fitted(model),sqrt(abs(residuals(model))), xlab="Fitted", ylab=expression(sqrt(hat(epsilon))))
+        print(sumary(lm(sqrt(abs(residuals(model))) ~ fitted(model))))
+        model <- lm(y ~ x, data)
+      }else if(transformation == "boxcox"){
+        
+        bc <- boxcox(model, plotit = TRUE) ## THE BUG (model/lm(y ~ x, data) would not work for some reason)
+        lambda <- bc$x[which.max(bc$y)]
+        if (lambda == 0) {
+          y_transformed <- log(y)
+        } else {
+          y_transformed <- (y^lambda - 1) / lambda
+        }
+        
+        model_transformed <- lm(y_transformed ~ x)
+        print(summary(model_transformed))
+        
+        # Plot diagnostics for the transformed model
+        par(mfrow=c(2,2))
+        plot(model_transformed)
+        par(mfrow=c(1,1))
+        
+        # Update the original data and model with the transformed response
+        data[[yname]] <- y_transformed
+        y <- y_transformed
+        model <- model_transformed
+        
+        cat("Box-Cox transformation applied with lambda =", lambda, "\n")
+      }else if(transformation == "done"){
+        print("done")
+      }else{
+        print("Invalid")
+      }
+    }
+  }else{
+    ### Compare MODELS
+    print("RIDGE")
+    results <- modelling(x, y, 0, metrics_df)
+    metrics_df <- results$metrics_df
+    print("LASSO")
+    results <- modelling(x, y, 1, metrics_df)
+    metrics_df <- results$metrics_df
+    print("OLS")
+    results <- olsfunc(x, y, data, metrics_df)
+    metrics_df <- results$metrics_df
+    print(summary(results$final_model))
+    print(metrics_df)
+  }
+  
+}
+```
+
+```{r}
+diagnos <- function(x, y, data){
+  g <- lm(y ~ x, data)
+  
+  ### Diagnostic: normality, homoscedasticity, and linearity
+  plot (fitted (g), residuals (g), xlab="Fitted", ylab="Residuals")
+  abline (h=0)
+  summary(lm (abs (residuals (g)) ~ fitted (g)))
+  
+  qqnorm (residuals (g), ylab="Residuals")
+  qqline (residuals (g))
+  hist (residuals (g))
+  set.seed(1)
+  subset_residuals <- sample(residuals(g), 5000)
+  print(shapiro.test(subset_residuals))
+  set.seed(1)
+  print(bptest(g))
+
+  gs <- summary (g) 
+  ginf <- influence (g)
+  stud <- residuals(g)/(gs$sig*sqrt(1-ginf$hat))
+  qqnorm (stud)
+  abline (0, 1)
+  
+  
+  ### Outliers, influential, high leverage
+   ID <- row.names (data)
+  halfnorm(influence(g)$hat, labs = ID, ylab = "data")
+  
+  cook <- cooks.distance(g)
+  halfnorm (cook, 3, labs=ID, ylab="Cook's distances")
+  gl <- lm(y ~ x, data, subset=(cook < max (cook)))
+  model_summary <- summary (gl)
+  
+  jack <- rstudent (g)
+  threshold <- qt (.05/(nrow(data)*2), model_summary$df[2])
+  outliers <- jack[which(abs(jack) > abs(threshold))]
+  print("Outliers")
+  print(outliers)
+  
+  plot(cook, ylab="Cook's distance", main="Cook's Distance Plot")
+  abline(h=4/length(cook), col="red")  # Add cutoff line
+  
+  influential <- which(cook > 4/length(cook))
+  print("Influential points")
+  print(influential)
+
+}
+```
+
+```{r}
+ftest <- function(data, y) { ### F-tests
+  reduced_vars_input <- readline(prompt = "Enter the names of variables to reduce(comma-separated)EX: mpg, engineSize: ")
+  reduced_vars <- strsplit(reduced_vars_input, ",")[[1]]
+  reduced_vars <- trimws(reduced_vars)
+  all_vars <- setdiff(names(data), c("y", reduced_vars))
+  reduced_formula <- as.formula(paste("y ~", paste(all_vars, collapse = " + ")))
+  reduced_model <- lm(reduced_formula, data = data)
+  full_formula <- as.formula(paste("y ~ ."))
+  
+  full_model <- lm(full_formula, data = data)
+  anova_results <- anova(reduced_model, full_model)
+  cat("ANOVA Results for Model Comparison:\n")
+  print(anova_results)
+}
+```
+
+```{r}
+olsfunc <- function(x, y, data, metrics_df){
+  model <- lm(y ~ x, data)
+  coefficients <- as.matrix(coef(model))
+  important_variables <- c(rownames(coefficients)[coefficients != 0], coefficients[coefficients != 0])
+  print(important_variables)
+  
+  residuals <- model$residuals
+  mse <- mean(residuals^2)
+  aic_value <- AIC(model)
+  bic_value <- BIC(model)
+  n <- length(y)
+  p <- length(coef(model))
+  rss <- sum(residuals(model)^2)
+  cp <- (rss / mse) - (n - 2 * p)
+  model_summary <- summary(model)
+  adj_r2 <- model_summary$adj.r.squared
+  
+  metrics <- data.frame(
+      Model = "OLS",
+      MSE = mse,
+      AIC = aic_value,
+      BIC = aic_value,
+      Mallow_Cp = cp,
+      Adjusted_R2 = adj_r2
+  )
+  metrics_df <- rbind(metrics_df, metrics)
+  return(list(metrics_df = metrics_df, final_model = model, coef = coef(model)))
+}
+```
+
+```{r}
+modelling <- function(x, y, n, metrics_df) {
+  if(n == 1){
+    name <- "Lasso"
+  }else{
+    name <- "Ridge"
+  }
+  grid.lambda <- 10^seq(10, -2, length = 100)
+  set.seed(1)
+  train <- sample(1:nrow(x), nrow(x) / 2)
+  test <- (-train)
+  y.train <- y[train]
+  y.test <- y[test]
+  
+  model <- glmnet(x, y, alpha = n, lambda = grid.lambda)
+  model.train <- glmnet(x[train, ], y.train, alpha = n, lambda = grid.lambda)
+
+  set.seed(1) #for reproducability
+  cv.out <- cv.glmnet(x[train, ], y.train, alpha = n)
+
+  best.lambda <- cv.out$lambda.min
+  best.lambda
+  plot(cv.out)
+  abline(v = log(best.lambda), col = "blue", lwd = 2)
+
+  pred <- predict(model.train, s = best.lambda, newx = x[test, ])
+  mspe <- mean((pred - y.test)^2)
+
+  final.model <- glmnet(x, y, alpha = n, lambda = best.lambda)
+  Coef <- coef(final.model)[1:ncol(x), ]
+  coefficients <- as.matrix(Coef)
+  important_variables <- c(rownames(coefficients)[coefficients != 0], coefficients[coefficients != 0])
+  print(important_variables)
+  
+  rss <- sum((pred - y.test)^2)
+  n <- length(y.test)
+  k <- length(coef(final.model))
+  aic <- n * log(rss / n) + 2 * k
+  bic <- n * log(rss / n) + k * log(n)
+  cp <- (rss / mean((pred - y.test)^2)) - (n - 2 * k)
+  tss <- sum((y.test - mean(y.test))^2)
+  r_squared <- 1 - (rss / tss)
+  adj_r_squared <- 1 - ((1 - r_squared) * (n - 1)) / (n - k - 1)
+  
+  ### Metrics
+  metrics <- data.frame(
+    Model = name,
+    MSE = mspe,
+    AIC = aic,
+    BIC = bic,
+    Mallow_Cp = cp,
+    Adjusted_R2 = adj_r_squared
+  )
+
+  metrics_df <- rbind(metrics_df, metrics)
+  return(list(metrics_df = metrics_df, final_model = final.model, coef = Coef))
+}
+```
+
+
+
+
+
+
+
+
+
+
+
